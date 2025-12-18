@@ -6,6 +6,8 @@ struct HandTrackingSystem: System {
     static let handTracking = HandTrackingProvider()
     static var latestLeftHand: HandAnchor?
     static var latestRightHand: HandAnchor?
+    static let sendInterval: TimeInterval = 1.0 / 30.0
+    static var lastSendTime: TimeInterval = 0.0
 
     init(scene: RealityKit.Scene) {
         Task { await Self.runSession() }
@@ -36,12 +38,16 @@ struct HandTrackingSystem: System {
                 HandTrackingData.shared.updateHand(anchor: anchorUpdate.anchor, chirality: .right)
             }
             
-            // Send both hands data via WebSocket
+            // Throttle WebSocket sends to reduce UI load.
             if WebSocketManager.shared.connectionState == .connected {
-                WebSocketManager.shared.sendBothHands(
-                    left: HandTrackingData.shared.leftHand.isTracked ? HandTrackingData.shared.leftHand : nil,
-                    right: HandTrackingData.shared.rightHand.isTracked ? HandTrackingData.shared.rightHand : nil
-                )
+                let now = Date().timeIntervalSinceReferenceDate
+                if now - Self.lastSendTime >= Self.sendInterval {
+                    Self.lastSendTime = now
+                    WebSocketManager.shared.sendVPHHands(
+                        left: HandTrackingData.shared.leftHand,
+                        right: HandTrackingData.shared.rightHand
+                    )
+                }
             }
         }
     }

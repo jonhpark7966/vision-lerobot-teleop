@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import simd
 
 @Observable
 class WebSocketManager: NSObject {
@@ -148,6 +149,42 @@ class WebSocketManager: NSObject {
             lastError = "Failed to encode hand data"
         }
     }
+
+    func sendVPHHands(left: HandTrackingData.HandData?, right: HandTrackingData.HandData?) {
+        guard connectionState == .connected else { return }
+
+        let message = VPHHandsMessage(
+            v: 1,
+            type: "vp_hands",
+            seq: DispatchTime.now().uptimeNanoseconds,
+            t: Date().timeIntervalSince1970,
+            hands: [
+                "L": buildVPHHandPayload(from: left),
+                "R": buildVPHHandPayload(from: right),
+            ]
+        )
+
+        do {
+            let encoder = JSONEncoder()
+            let jsonData = try encoder.encode(message)
+            let jsonString = String(data: jsonData, encoding: .utf8)!
+
+            webSocketTask?.send(.string(jsonString)) { [weak self] error in
+                if let error = error {
+                    print("WebSocket send error: \(error)")
+                    self?.lastError = error.localizedDescription
+                } else {
+                    DispatchQueue.main.async {
+                        self?.messagesSent += 1
+                        self?.lastMessageTime = Date()
+                    }
+                }
+            }
+        } catch {
+            print("Encoding error: \(error)")
+            lastError = "Failed to encode vp_hands"
+        }
+    }
     
     // MARK: - Private Methods
     
@@ -192,6 +229,44 @@ class WebSocketManager: NSObject {
             }
         }
     }
+
+    private func buildVPHHandPayload(from hand: HandTrackingData.HandData?) -> VPHHandPayload {
+        guard let hand = hand, hand.isTracked else {
+            return VPHHandPayload(tracked: false, wrist_p: nil, wrist_q: nil, pinch: nil)
+        }
+
+        guard let wrist = jointData(in: hand, name: "forearm.wrist"), wrist.isTracked else {
+            return VPHHandPayload(tracked: false, wrist_p: nil, wrist_q: nil, pinch: nil)
+        }
+
+        let pinch = computePinch(for: hand)
+        return VPHHandPayload(
+            tracked: true,
+            wrist_p: [wrist.position.x, wrist.position.y, wrist.position.z],
+            wrist_q: nil,
+            pinch: pinch
+        )
+    }
+
+    private func computePinch(for hand: HandTrackingData.HandData) -> Float? {
+        guard
+            let thumb = jointData(in: hand, name: "thumb.tip"),
+            let index = jointData(in: hand, name: "index.tip"),
+            thumb.isTracked,
+            index.isTracked
+        else {
+            return nil
+        }
+
+        let distance = simd_distance(thumb.position, index.position)
+        let maxDistance: Float = 0.06
+        let normalized = 1.0 - min(distance / maxDistance, 1.0)
+        return max(0.0, min(normalized, 1.0))
+    }
+
+    private func jointData(in hand: HandTrackingData.HandData, name: String) -> HandTrackingData.JointData? {
+        hand.joints.first { $0.name == name }
+    }
     
     // Singleton
     static let shared = WebSocketManager()
@@ -234,6 +309,21 @@ struct BothHandsMessage: Codable {
     let timestamp: Double
     let leftHand: HandDataCompact?
     let rightHand: HandDataCompact?
+}
+
+struct VPHHandsMessage: Codable {
+    let v: Int
+    let type: String
+    let seq: UInt64
+    let t: Double
+    let hands: [String: VPHHandPayload]
+}
+
+struct VPHHandPayload: Codable {
+    let tracked: Bool
+    let wrist_p: [Float]?
+    let wrist_q: [Float]?
+    let pinch: Float?
 }
 
 struct HandDataCompact: Codable {
